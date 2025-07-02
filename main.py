@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 import os
+from enum import Enum
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -31,14 +33,27 @@ async def read_root():
 
 
 class ExtractMealRequest(BaseModel):
-    image_url: str
+    images: List[str]
+    textualData: str  # Optional, can be used for additional context
+
+
+class Unit(str, Enum):
+    Grams = "g"
+    Milliliters = "ml"
+    Pieces = "pcs"
+    Slices = "slice"
+    Cups = "cup"
+    Tablespoons = "tbsp"
+    Servings = "serving"
 
 
 class MealItem(BaseModel):
-    id: str  # You can leave this blank and assign in backend later
+    id: str
     name: str
     fii: int
-    kcal: int
+    quantity: float
+    unit: Unit
+    kcalPerUnit: int
 
 
 class Meal(BaseModel):
@@ -52,34 +67,49 @@ class Meal(BaseModel):
 async def extract_meal(data: ExtractMealRequest):
     try:
         prompt = """
-        You are a nutritionist assistant. Analyze the image of the food and extract the meal name and list of items.
-        For each food item, return:
-        - name (string)
-        - estimated FII (0–100, integer)
-        - estimated kcal (integer)
+        You are a nutritionist assistant. Analyze the image of the food and extract the overall meal name and a list of food ingredients that appear in the entire meal.
 
-        Respond ONLY in JSON format like this:
-        {
-            "name": "Meal name",
-            "items": [
-                { "name": "Item 1", "fii": 55, "kcal": 200 },
-                { "name": "Item 2", "fii": 70, "kcal": 120 }
-            ]
-        }
+For each food ingredient, return the following information as a structured JSON object:
+
+- **name**: the name of the ingredient (string)
+- **fii**: estimated Food Insulin Index (integer from 0 to 100)
+- **unit**: unit of measurement (one of: "g", "ml", "pcs", "slice", "cup", "tbsp", "serving")
+- **kcalPerUnit**: estimated number of kilocalories for **one unit only**, **not** the total for the whole portion (e.g., 1 slice of bread = 80 kcal, not 160 kcal for 2 slices)
+- **quantity**: how many units were present in the meal (e.g., 2.5 slices, 100g, 1.25 cups)
+
+⚠️ Important:
+- Do **not multiply** kcalPerUnit by quantity — only return kcalPerUnit as the value for **a single unit**.
+- The `quantity` field tells how many units were consumed.
+- We will calculate total kcal programmatically using: `totalKcal = quantity × kcalPerUnit`
+
+Return only the meal name and the array of items in valid JSON format, no text explanation.
+
         """
 
+        content = [{"type": "input_text", "text": prompt}]
+
+        content += [{"type": "input_image", "image_url": image}
+                    for image in data.images]
+
+        if data.textualData:
+            content.append({"type": "input_text", "text": data.textualData})
+
+        for image in data.images:
+            # Ensure the images directory exists
+            os.makedirs("images", exist_ok=True)
+            # Determine the image index (1-based)
+            image_index = data.images.index(image) + 1
+            # Decode base64 image and save to file
+            image_data = base64.b64decode(image.split(",")[-1])
+            with open(f"images/{image_index}.jpg", "wb") as f:
+                f.write(image_data)
+
         response = client.responses.parse(
-            model="gpt-4.1-mini",
+            model="gpt-4.1",
             input=[{
                 "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {
-                        "type": "input_image",
-                        "image_url": data.image_url,
-                    },
-                ],
-            }],
+                "content": content,
+            }],  # type: ignore
             text_format=Meal
         )
 
@@ -87,6 +117,10 @@ async def extract_meal(data: ExtractMealRequest):
         parsed_meal = response.output_parsed
 
         # Generate IDs and timestamp server-side
+        if not parsed_meal:
+            raise HTTPException(
+                status_code=400, detail="Invalid meal data received")
+
         meal_id = str(uuid.uuid4())
         for item in parsed_meal.items:
             item.id = str(uuid.uuid4())
@@ -96,7 +130,7 @@ async def extract_meal(data: ExtractMealRequest):
                 "id": meal_id,
                 "name": parsed_meal.name,
                 "timestamp": int(time.time() * 1000),
-                "items": [item.dict() for item in parsed_meal.items]
+                "items": [item.model_dump() for item in parsed_meal.items]
             }
         }
 
