@@ -61,6 +61,7 @@ class Meal(BaseModel):
     name: str
     timestamp: int  # You can inject time after parsing
     items: List[MealItem]
+    aiComment: str
 
 
 @app.post("/extract-meal")
@@ -76,6 +77,7 @@ For each food ingredient, return the following information as a structured JSON 
 - **unit**: unit of measurement (one of: "g", "ml", "pcs", "slice", "cup", "tbsp", "serving")
 - **kcalPerUnit**: estimated number of kilocalories for **one unit only**, **not** the total for the whole portion (e.g., 1 slice of bread = 80 kcal, not 160 kcal for 2 slices)
 - **quantity**: how many units were present in the meal (e.g., 2.5 slices, 100g, 1.25 cups)
+- **aiComment**: talk about what u understand about the meal, and talk about the healthiness of the meal, and what you would recommend to improve it, and talk about the insuline and glucose response of the meal.
 
 ⚠️ Important:
 - Do **not multiply** kcalPerUnit by quantity — only return kcalPerUnit as the value for **a single unit**.
@@ -130,7 +132,8 @@ Return only the meal name and the array of items in valid JSON format, no text e
                 "id": meal_id,
                 "name": parsed_meal.name,
                 "timestamp": int(time.time() * 1000),
-                "items": [item.model_dump() for item in parsed_meal.items]
+                "items": [item.model_dump() for item in parsed_meal.items],
+                "aiComment": parsed_meal.aiComment
             }
         }
 
